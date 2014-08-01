@@ -205,8 +205,14 @@ QPrinter::PaperSize QMacPrintEnginePrivate::paperSize() const
         return QPrinter::Custom;
     PMRect paper;
     PMGetUnadjustedPaperRect(format, &paper);
-    QSizeF sizef((paper.right - paper.left) / 72.0 * 25.4, (paper.bottom - paper.top) / 72.0 * 25.4);
-    return QPlatformPrinterSupport::convertQSizeFToPaperSize(sizef);
+    int wMM = int((paper.right - paper.left) / 72 * 25.4 + 0.5);
+    int hMM = int((paper.bottom - paper.top) / 72 * 25.4 + 0.5);
+    for (int i = QPrinter::A4; i < QPrinter::NPaperSize; ++i) {
+        QSize s = qt_paperSizeToQSizeF(QPrinter::PaperSize(i)).toSize();
+        if (s.width() == wMM && s.height() == hMM)
+            return (QPrinter::PaperSize)i;
+    }
+    return QPrinter::Custom;
 }
 
 QList<QVariant> QMacPrintEnginePrivate::supportedResolutions() const
