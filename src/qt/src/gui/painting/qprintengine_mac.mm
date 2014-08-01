@@ -148,30 +148,51 @@ QMacPrintEnginePrivate::~QMacPrintEnginePrivate()
 void QMacPrintEnginePrivate::setPaperSize(QPrinter::PaperSize ps)
 {
     Q_Q(QMacPrintEngine);
-    QSize newSize = qt_paperSizeToQSizeF(ps).toSize();
-    QCFType<CFArrayRef> formats;
+    if (hasCustomPaperSize) {
+        PMRelease(customPaper);
+        customPaper = 0;
+    }
+    hasCustomPaperSize = (ps == QPrinter::Custom);
     PMPrinter printer;
-
-    if (PMSessionGetCurrentPrinter(session, &printer) == noErr
-        && PMSessionCreatePageFormatList(session, printer, &formats) == noErr) {
-        CFIndex total = CFArrayGetCount(formats);
-        PMPageFormat tmp;
-        PMRect paper;
-        for (CFIndex idx = 0; idx < total; ++idx) {
-            tmp = static_cast<PMPageFormat>(
-                                        const_cast<void *>(CFArrayGetValueAtIndex(formats, idx)));
-            PMGetUnadjustedPaperRect(tmp, &paper);
-            int wMM = int((paper.right - paper.left) / 72 * 25.4 + 0.5);
-            int hMM = int((paper.bottom - paper.top) / 72 * 25.4 + 0.5);
-            if (newSize.width() == wMM && newSize.height() == hMM) {
-                PMCopyPageFormat(tmp, format);
-                // reset the orientation and resolution as they are lost in the copy.
-                q->setProperty(QPrintEngine::PPK_Orientation, orient);
-                if (PMSessionValidatePageFormat(session, format, kPMDontWantBoolean) != noErr) {
-                    // Don't know, warn for the moment.
-                    qWarning("QMacPrintEngine, problem setting format and resolution for this page size");
+    if (PMSessionGetCurrentPrinter(session(), &printer) == noErr) {
+        if (ps != QPrinter::Custom) {
+            QSizeF newSize = QPlatformPrinterSupport::convertPaperSizeToQSizeF(ps);
+            QCFType<CFArrayRef> formats;
+            if (PMSessionCreatePageFormatList(session(), printer, &formats) == noErr) {
+                CFIndex total = CFArrayGetCount(formats);
+                PMPageFormat tmp;
+                PMRect paper;
+                for (CFIndex idx = 0; idx < total; ++idx) {
+                    tmp = static_cast<PMPageFormat>(const_cast<void *>(CFArrayGetValueAtIndex(formats, idx)));
+                    PMGetUnadjustedPaperRect(tmp, &paper);
+                    int wMM = int((paper.right - paper.left) / 72 * 25.4 + 0.5);
+                    int hMM = int((paper.bottom - paper.top) / 72 * 25.4 + 0.5);
+                    if (newSize.width() == wMM && newSize.height() == hMM) {
+                        PMCopyPageFormat(tmp, format());
+                        // reset the orientation and resolution as they are lost in the copy.
+                        q->setProperty(QPrintEngine::PPK_Orientation, orient);
+                        if (PMSessionValidatePageFormat(session(), format(), kPMDontWantBoolean) != noErr) {
+                            // Don't know, warn for the moment.
+                            qWarning("QMacPrintEngine, problem setting format and resolution for this page size");
+                        }
+                        break;
+                    }
                 }
-                break;
+            }
+        } else {
+            QCFString paperId = QCFString::toCFStringRef(QUuid::createUuid().toString());
+            PMPaperMargins paperMargins;
+            paperMargins.left = leftMargin;
+            paperMargins.top = topMargin;
+            paperMargins.right = rightMargin;
+            paperMargins.bottom = bottomMargin;
+            PMPaperCreateCustom(printer, paperId, QCFString("Custom size"), customSize.width(), customSize.height(), &paperMargins, &customPaper);
+            PMPageFormat tmp;
+            PMCreatePageFormatWithPMPaper(&tmp, customPaper);
+            PMCopyPageFormat(tmp, format());
+            if (PMSessionValidatePageFormat(session(), format(), kPMDontWantBoolean) != noErr) {
+                // Don't know, warn for the moment.
+                qWarning("QMacPrintEngine, problem setting paper name");
             }
         }
     }
@@ -182,15 +203,43 @@ QPrinter::PaperSize QMacPrintEnginePrivate::paperSize() const
     if (hasCustomPaperSize)
         return QPrinter::Custom;
     PMRect paper;
-    PMGetUnadjustedPaperRect(format, &paper);
-    int wMM = int((paper.right - paper.left) / 72 * 25.4 + 0.5);
-    int hMM = int((paper.bottom - paper.top) / 72 * 25.4 + 0.5);
-    for (int i = QPrinter::A4; i < QPrinter::NPaperSize; ++i) {
-        QSize s = qt_paperSizeToQSizeF(QPrinter::PaperSize(i)).toSize();
-        if (s.width() == wMM && s.height() == hMM)
-            return (QPrinter::PaperSize)i;
+    PMGetUnadjustedPaperRect(format(), &paper);
+    QSizeF sizef((paper.right - paper.left) / 72.0 * 25.4, (paper.bottom - paper.top) / 72.0 * 25.4);
+    return QPlatformPrinterSupport::convertQSizeFToPaperSize(sizef);
+}
+
+void QMacPrintEnginePrivate::setPaperName(const QString &name)
+{
+    Q_Q(QMacPrintEngine);
+    if (hasCustomPaperSize) {
+        PMRelease(customPaper);
+        customPaper = 0;
+        hasCustomPaperSize = false;
     }
-    return QPrinter::Custom;
+    PMPrinter printer;
+
+    if (PMSessionGetCurrentPrinter(session(), &printer) == noErr) {
+        CFArrayRef array;
+        if (PMPrinterGetPaperList(printer, &array) != noErr)
+            return;
+        int count = CFArrayGetCount(array);
+        for (int i = 0; i < count; ++i) {
+            PMPaper paper = static_cast<PMPaper>(const_cast<void *>(CFArrayGetValueAtIndex(array, i)));
+            QCFString paperName;
+            if (PMPaperCreateLocalizedName(paper, printer, &paperName) == noErr) {
+                if (QString(paperName) == name) {
+                    PMPageFormat tmp;
+                    PMCreatePageFormatWithPMPaper(&tmp, paper);
+                    PMCopyPageFormat(tmp, format());
+                    q->setProperty(QPrintEngine::PPK_Orientation, orient);
+                    if (PMSessionValidatePageFormat(session(), format(), kPMDontWantBoolean) != noErr) {
+                        // Don't know, warn for the moment.
+                        qWarning("QMacPrintEngine, problem setting paper name");
+                    }
+                }
+            }
+        }
+    }
 }
 
 QList<QVariant> QMacPrintEnginePrivate::supportedResolutions() const
@@ -743,11 +792,11 @@ void QMacPrintEngine::setProperty(PrintEnginePropertyKey key, const QVariant &va
     case PPK_CustomPaperSize:
     {
         PMOrientation orientation;
-        PMGetOrientation(d->format, &orientation);
-        d->hasCustomPaperSize = true;
+        PMGetOrientation(d->format(), &orientation);
         d->customSize = value.toSizeF();
         if (orientation != kPMPortrait)
             d->customSize = QSizeF(d->customSize.height(), d->customSize.width());
+        d->setPaperSize(QPrinter::Custom);
         break;
     }
     case PPK_PageMargins:
@@ -891,13 +940,15 @@ QVariant QMacPrintEngine::property(PrintEnginePropertyKey key) const
         if (d->hasCustomPageMargins) {
             margins << d->leftMargin << d->topMargin
                     << d->rightMargin << d->bottomMargin;
-        } else {
+        } else if (!d->hasCustomPaperSize) {
             PMPaperMargins paperMargins;
             PMPaper paper;
-            PMGetPageFormatPaper(d->format, &paper);
+            PMGetPageFormatPaper(d->format(), &paper);
             PMPaperGetMargins(paper, &paperMargins);
             margins << paperMargins.left << paperMargins.top
                     << paperMargins.right << paperMargins.bottom;
+        } else {
+            margins << 0 << 0 << 0 << 0;
         }
         ret = margins;
         break;
